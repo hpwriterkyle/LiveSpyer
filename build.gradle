@@ -1,0 +1,53 @@
+plugins {
+    id 'java'
+    id 'application'
+}
+
+group = 'top.vrilhyc.applications'
+version = '1.0-SNAPSHOT'
+
+java {
+    toolchain { languageVersion = JavaLanguageVersion.of(21) }
+}
+
+application { mainClass = 'top.vrilhyc.applications.Main' }
+tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }
+
+def windowsHost = tasks.register('buildBrowserHost', Exec) {
+    onlyIf { System.getProperty('os.name').startsWith('Windows') }
+    inputs.files('native/windows/BrowserHost.cs', 'scripts/build-browser-host.ps1')
+    outputs.dir(layout.buildDirectory.dir('native-host'))
+    commandLine 'powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file('scripts/build-browser-host.ps1')
+}
+tasks.named('run') { dependsOn windowsHost }
+tasks.named('assemble') { dependsOn windowsHost }
+['installDist', 'distZip', 'distTar'].each { taskName -> tasks.named(taskName) { dependsOn windowsHost } }
+distributions.main.contents { from(layout.buildDirectory.dir('native-host')) { into 'native-host' } }
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'com.google.code.gson:gson:2.13.1'
+    implementation 'com.google.zxing:javase:3.5.3'
+    implementation 'net.java.dev.jna:jna-jpms:5.14.0'
+    implementation 'org.webjars.npm:hls.js:1.5.15'
+    implementation 'com.formdev:flatlaf:3.5.4'
+    testImplementation platform('org.junit:junit-bom:5.10.0')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+test {
+    useJUnitPlatform { excludeTags 'live' }
+}
+
+tasks.register('liveSmoke', Test) {
+    description = 'Read-only Bilibili room and HLS check (requires network).'
+    group = 'verification'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    useJUnitPlatform { includeTags 'live' }
+    systemProperty 'live.room', providers.gradleProperty('liveRoom').getOrElse('6')
+}
