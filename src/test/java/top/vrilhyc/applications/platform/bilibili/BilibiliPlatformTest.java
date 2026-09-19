@@ -11,6 +11,31 @@ import javax.net.ssl.SSLSession;
 import static org.junit.jupiter.api.Assertions.*;
 
 class BilibiliPlatformTest {
+    @Test void publicRoomDetailsAndRankingNeverUseAccountCredentials() throws Exception {
+        var platform = new BilibiliPlatform(new BiliApi(request -> {
+            assertTrue(request.headers().firstValue("Cookie").isEmpty());
+            String body = request.uri().getPath().endsWith("get_info")
+                    ? "{\"room_id\":12,\"uid\":34,\"title\":\"测试\",\"live_status\":1,\"live_time\":\"2026-09-19 16:38:15\"}"
+                    : "{\"onlineNum\":25,\"OnlineRankItem\":[{\"userRank\":1,\"name\":\"名**<html>\",\"wealth_level\":6},{\"name\":\"另一个\",\"guard_level\":3},{\"bad\":1}]}";
+            return response(request,"{\"code\":0,\"data\":"+body+"}",Map.of());
+        }));
+        var details = platform.roomDetails("12");
+        assertEquals(java.time.Instant.parse("2026-09-19T08:38:15Z"),details.startedAt());
+        var viewers = platform.onlineViewers(details);
+        assertEquals(25,viewers.count()); assertEquals(2,viewers.viewers().size());
+        assertEquals("名**<html>",viewers.viewers().getFirst().name());
+        assertEquals(6,viewers.viewers().getFirst().gloryLevel());
+        assertEquals(0,viewers.viewers().getLast().gloryLevel());
+    }
+    @Test void missingOrOfflineStartTimeDoesNotInventDurationAndRankingIsBounded() {
+        for (String json : List.of(
+                "{\"room_id\":1,\"uid\":2,\"title\":\"x\",\"live_status\":0,\"live_time\":\"2026-09-19 16:00:00\"}",
+                "{\"room_id\":1,\"uid\":2,\"title\":\"x\",\"live_status\":1,\"live_time\":\"0000-00-00 00:00:00\"}"))
+            assertNull(BilibiliPlatform.parseDetails(JsonParser.parseString(json).getAsJsonObject()).startedAt());
+        var data = JsonParser.parseString("{\"OnlineRankItem\":["+String.join(",",Collections.nCopies(100,"{\"name\":\"name\"}"))+"]}").getAsJsonObject();
+        assertEquals(50,BilibiliPlatform.parseViewers(data).viewers().size());
+        assertEquals(-1,BilibiliPlatform.parseViewers(data).count());
+    }
     static HttpResponse<String> response(HttpRequest request, String body, Map<String,List<String>> headers) {
         return new HttpResponse<>() {
             public int statusCode() { return 200; }

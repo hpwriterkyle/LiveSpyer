@@ -1,6 +1,9 @@
 // Window hosting only. Playback, stream requests and room/account logic remain in Java.
 using System;
 using System.Drawing;
+using System.IO;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -48,7 +51,19 @@ internal sealed class BrowserHost : Form {
     }
     async Task InitializeBrowser() {
         try {
+            string fixedRuntime = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "WebView2Runtime");
+            if (Directory.Exists(fixedRuntime)) {
+                // ZIP extraction/MSI installation may discard the build machine's ACLs.
+                // Windows 11 AppContainer processes need read/execute on bundled public runtime files.
+                var access = Directory.GetAccessControl(fixedRuntime);
+                foreach (string sid in new string[] { "S-1-15-2-1", "S-1-15-2-2" })
+                    access.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(sid),
+                        FileSystemRights.ReadAndExecute, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                        PropagationFlags.None, AccessControlType.Allow));
+                Directory.SetAccessControl(fixedRuntime, access);
+            }
             browser.CreationProperties = new CoreWebView2CreationProperties {
+                BrowserExecutableFolder = Directory.Exists(fixedRuntime) ? fixedRuntime : null,
                 UserDataFolder = profile,
                 IsInPrivateModeEnabled = true,
                 AdditionalBrowserArguments = "--autoplay-policy=no-user-gesture-required"

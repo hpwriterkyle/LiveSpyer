@@ -3,6 +3,7 @@ package top.vrilhyc.applications.player;
 import com.sun.jna.Native;
 import com.sun.jna.Pointer;
 import top.vrilhyc.applications.model.StreamSource;
+import top.vrilhyc.applications.model.DanmakuMessage;
 import top.vrilhyc.applications.platform.PlatformException;
 import top.vrilhyc.applications.player.browser.BrowserMediaServer;
 import java.awt.Canvas;
@@ -18,15 +19,22 @@ public final class BrowserPlayer implements LivePlayer {
     private final Canvas canvas;
     private final Consumer<String> status;
     private final Runnable playbackError;
-    private BrowserMediaServer server;
+    private final Consumer<String> viewActions;
+    private volatile BrowserMediaServer server;
+    private volatile boolean danmakuEnabled=true;
     private Process host;
     private Path profile;
     private volatile boolean closed, playing;
+    private volatile boolean audioOnly;
     private volatile long nativeHandle;
     private int volume = 30;
     private boolean muted;
     public BrowserPlayer(Canvas canvas, Consumer<String> status, Runnable playbackError) {
+        this(canvas,status,playbackError,ignored -> {});
+    }
+    public BrowserPlayer(Canvas canvas, Consumer<String> status, Runnable playbackError, Consumer<String> viewActions) {
         this.canvas = canvas; this.status = status; this.playbackError = playbackError;
+        this.viewActions=viewActions;
         canvas.addHierarchyListener(event -> {
             if (canvas.isDisplayable()) nativeHandle = Pointer.nativeValue(Native.getComponentPointer(canvas));
             else nativeHandle = 0;
@@ -42,12 +50,16 @@ public final class BrowserPlayer implements LivePlayer {
             if (handle == 0) throw new PlatformException("播放窗口尚未就绪，请重试");
             releaseHost();
             server = new BrowserMediaServer(event -> {
+                if(!closed && event.startsWith("view:")) { viewActions.accept(event.substring(5));return; }
                 if (closed || !playing) return;
                 switch (event) {
-                    case "playing" -> status.accept("正在播放 · 浏览器内核");
+                    case "playing" -> status.accept(audioOnly ? "正在播放 · 仅音频流" : "正在播放 · 浏览器内核");
                     case "buffering" -> status.accept("正在缓冲…");
                     case "autoplay" -> status.accept("请点击画面开始播放");
                     case "error" -> { playing = false; playbackError.run(); }
+                    default -> {
+                        if(event.startsWith("distance:")) status.accept((audioOnly ? "仅音频 · " : "正在播放 · ")+"距流边缘约 "+event.substring(9)+" 秒");
+                    }
                 }
             });
             profile = Files.createTempDirectory("LiveSpyer-WebView2-");
@@ -79,12 +91,15 @@ public final class BrowserPlayer implements LivePlayer {
     }
     private static Path findHost() throws Exception {
         var roots = new LinkedHashSet<Path>();
-        roots.add(Path.of(System.getProperty("user.dir")));
         Path location = Path.of(BrowserPlayer.class.getProtectionDomain().getCodeSource().getLocation().toURI());
-        if (location.toString().endsWith(".jar")) roots.add(location.getParent().getParent());
+        if (location.toString().endsWith(".jar")) {
+            roots.add(location.getParent()); // jpackage app/ directory
+            roots.add(location.getParent().getParent()); // Gradle lib/ directory
+        }
         else for (Path parent = location; parent != null; parent = parent.getParent()) {
             if (parent.getFileName() != null && parent.getFileName().toString().equals("build")) { roots.add(parent.getParent()); break; }
         }
+        roots.add(Path.of(System.getProperty("user.dir")));
         for (Path root : roots) for (String relative : List.of("native-host/LiveSpyer.BrowserHost.exe","build/native-host/LiveSpyer.BrowserHost.exe")) {
             Path candidate = root.resolve(relative).toAbsolutePath();
             if (Files.isRegularFile(candidate)) return candidate;
@@ -94,7 +109,8 @@ public final class BrowserPlayer implements LivePlayer {
     @Override public synchronized void play(StreamSource source) {
         if (closed) return;
         initialize(); playing = true;
-        server.volume(volume); server.muted(muted); server.play(source);
+        server.volume(volume); server.muted(muted); server.danmakuVisible(danmakuEnabled); server.play(source);
+        audioOnly = source.audioOnly();
     }
     @Override public synchronized void stop() {
         playing = false;
@@ -102,6 +118,9 @@ public final class BrowserPlayer implements LivePlayer {
     }
     @Override public synchronized void volume(int percent) { volume = Math.clamp(percent,0,100); if (server != null) server.volume(volume); }
     @Override public synchronized void muted(boolean value) { muted = value; if (server != null) server.muted(value); }
+    @Override public void showDanmaku(DanmakuMessage message) { var current=server; if(current!=null && !closed) current.danmaku(message); }
+    @Override public void danmakuVisible(boolean visible) { danmakuEnabled=visible; var current=server; if(current!=null) current.danmakuVisible(visible); }
+    @Override public void goLive() { var current=server; if(current!=null) current.goLive(); }
     private void releaseHost() {
         if (server != null) { server.close(); server = null; }
         Process process = host;

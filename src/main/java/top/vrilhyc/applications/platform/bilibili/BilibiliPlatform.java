@@ -6,6 +6,9 @@ import top.vrilhyc.applications.model.*;
 import top.vrilhyc.applications.platform.*;
 import java.net.URI;
 import java.util.Map;
+import java.util.ArrayList;
+import java.time.*;
+import java.time.format.DateTimeFormatter;
 
 public final class BilibiliPlatform implements LivePlatform {
     private final BiliApi api;
@@ -14,6 +17,46 @@ public final class BilibiliPlatform implements LivePlatform {
     @Override public String id() { return "bilibili"; }
     @Override public String displayName() { return "哔哩哔哩"; }
     @Override public String toString() { return displayName(); }
+    @Override public boolean supportsRoomDetails() { return true; }
+    @Override public RoomDetails roomDetails(String input) throws Exception {
+        return parseDetails(api.get("https://api.live.bilibili.com/room/v1/Room/get_info?room_id="
+                + normalizeRoomId(input), AccountSession.guest()));
+    }
+    static RoomDetails parseDetails(JsonObject data) {
+        String id = data.get("room_id").getAsString();
+        boolean live = data.get("live_status").getAsInt() == 1;
+        Instant started = null;
+        if (live && data.has("live_time")) {
+            try {
+                var time = LocalDateTime.parse(data.get("live_time").getAsString(), DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+                if (time.getYear() >= 2000) started = time.atZone(ZoneId.of("Asia/Shanghai")).toInstant();
+            } catch (RuntimeException ignored) { /* Missing timestamps must not become invented durations. */ }
+        }
+        return new RoomDetails(new LiveRoom("bilibili", id, data.get("title").getAsString(), live), data.get("uid").getAsString(), started);
+    }
+    @Override public OnlineViewers onlineViewers(RoomDetails room) throws Exception {
+        return parseViewers(api.get("https://api.live.bilibili.com/xlive/general-interface/v1/rank/getOnlineGoldRank?roomId="
+                + normalizeRoomId(room.room().roomId()) + "&ruid=" + BiliApi.escape(room.anchorId())
+                + "&page=1&pageSize=50", AccountSession.guest()));
+    }
+    static OnlineViewers parseViewers(JsonObject data) {
+        var viewers = new ArrayList<OnlineViewers.Viewer>();
+        JsonArray list = data.has("OnlineRankItem") && data.get("OnlineRankItem").isJsonArray()
+                ? data.getAsJsonArray("OnlineRankItem") : new JsonArray();
+        for (JsonElement element : list) {
+            if (viewers.size() >= 50) break;
+            try {
+                var item = element.getAsJsonObject();
+                // Use the public display name as supplied, including redaction/mystery identities.
+                String name = item.get("name").getAsString();
+                int rank = item.has("userRank") ? item.get("userRank").getAsInt() : viewers.size() + 1;
+                int glory = item.has("wealth_level") && !item.get("wealth_level").isJsonNull() ? item.get("wealth_level").getAsInt() : 0;
+                viewers.add(new OnlineViewers.Viewer(name, rank, Math.max(0, glory)));
+            } catch (RuntimeException ignored) { /* Skip malformed entries without discarding the whole list. */ }
+        }
+        long count = data.has("onlineNum") && !data.get("onlineNum").isJsonNull() ? data.get("onlineNum").getAsLong() : -1;
+        return new OnlineViewers(count, viewers);
+    }
     @Override public QrLogin qrLogin() { return new BiliQrLogin(api); }
     @Override public String normalizeRoomId(String input) {
         String value = input == null ? "" : input.trim();
@@ -71,5 +114,9 @@ public final class BilibiliPlatform implements LivePlatform {
     }
     @Override public RoomInteraction newInteraction(LiveRoom room, AccountSession session) {
         return new BiliInteraction(api, room, session);
+    }
+    @Override public DanmakuSubscription subscribeDanmaku(LiveRoom room,
+            java.util.function.Consumer<DanmakuMessage> messages, java.util.function.Consumer<String> status) {
+        return new BiliDanmakuSubscription(api,room,messages,status);
     }
 }

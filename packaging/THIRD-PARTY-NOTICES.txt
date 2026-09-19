@@ -1,0 +1,20 @@
+LiveSpyer Windows distribution
+
+Eclipse Temurin JRE 21.0.12.1+1 (Eclipse Adoptium): GPLv2 with Classpath Exception.
+The complete runtime legal/ directory and NOTICE are included under runtime/.
+Source: https://github.com/adoptium/temurin21-binaries/releases/tag/jdk-21.0.12.1%2B1
+
+Microsoft Edge WebView2 Fixed Version Runtime 153.0.4234.48 x64:
+Microsoft WebView2 redistribution terms and third-party notices apply.
+All runtime files and notices are retained in app/native-host/WebView2Runtime/.
+WebView2 SDK 1.0.2903.40 license and notices are in app/native-host/.
+Source: https://developer.microsoft.com/en-us/microsoft-edge/webview2/
+
+Java libraries are distributed unmodified in app/; their bundled license/notice files remain in each JAR:
+Gson 2.13.1 (Apache-2.0), Brotli decoder 0.1.2 (MIT), protobuf-java 4.33.5 (BSD-3-Clause),
+ZXing 3.5.3 (Apache-2.0), JNA 5.14.0 (LGPL-2.1-or-later OR Apache-2.0),
+hls.js 1.5.15 (Apache-2.0), FlatLaf 3.5.4 (Apache-2.0).
+Transitive dependencies retain their original JAR licenses and notices.
+
+WiX Toolset 3.14.1 is used only at build time; its installer bootstrapper is produced by jpackage.
+Source: https://github.com/wixtoolset/wix3/releases/tag/wix3141rtm

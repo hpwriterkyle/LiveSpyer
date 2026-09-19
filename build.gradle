@@ -12,6 +12,12 @@ java {
 
 application { mainClass = 'top.vrilhyc.applications.Main' }
 tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }
+tasks.named('jar') {
+    manifest {
+        attributes 'Main-Class': application.mainClass.get(),
+                'Class-Path': configurations.runtimeClasspath.files.collect { it.name }.join(' ')
+    }
+}
 
 def windowsHost = tasks.register('buildBrowserHost', Exec) {
     onlyIf { System.getProperty('os.name').startsWith('Windows') }
@@ -23,6 +29,10 @@ tasks.named('run') { dependsOn windowsHost }
 tasks.named('assemble') { dependsOn windowsHost }
 ['installDist', 'distZip', 'distTar'].each { taskName -> tasks.named(taskName) { dependsOn windowsHost } }
 distributions.main.contents { from(layout.buildDirectory.dir('native-host')) { into 'native-host' } }
+['distZip', 'distTar'].each { taskName ->
+    tasks.named(taskName) { destinationDirectory = layout.buildDirectory.dir('packaging/distributions') }
+}
+tasks.named('installDist') { destinationDir = layout.buildDirectory.dir('packaging/install/LiveSpyer').get().asFile }
 
 repositories {
     mavenCentral()
@@ -30,6 +40,8 @@ repositories {
 
 dependencies {
     implementation 'com.google.code.gson:gson:2.13.1'
+    implementation 'org.brotli:dec:0.1.2'
+    implementation 'com.google.protobuf:protobuf-java:4.33.5' // Bilibili SEND_GIFT_V2 wire format.
     implementation 'com.google.zxing:javase:3.5.3'
     implementation 'net.java.dev.jna:jna-jpms:5.14.0'
     implementation 'org.webjars.npm:hls.js:1.5.15'
@@ -50,4 +62,29 @@ tasks.register('liveSmoke', Test) {
     classpath = sourceSets.test.runtimeClasspath
     useJUnitPlatform { includeTags 'live' }
     systemProperty 'live.room', providers.gradleProperty('liveRoom').getOrElse('6')
+}
+
+tasks.register('stageWindowsPackageLibraries', Sync) {
+    dependsOn 'jar'
+    from tasks.named('jar')
+    from configurations.runtimeClasspath
+    into layout.buildDirectory.dir('packaging/libraries')
+}
+tasks.register('buildWindowsPackageHost', Exec) {
+    onlyIf { System.getProperty('os.name').startsWith('Windows') }
+    inputs.files('native/windows/BrowserHost.cs', 'scripts/build-browser-host.ps1')
+    outputs.dir(layout.buildDirectory.dir('packaging/native-host'))
+    commandLine 'powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file('scripts/build-browser-host.ps1'),
+            '-OutputDirectory', layout.buildDirectory.dir('packaging/native-host').get().asFile
+}
+tasks.register('packageWindows', Exec) {
+    description = 'Build a Windows x64 GUI installer and portable EXE folder with Java and WebView2 included.'
+    group = 'distribution'
+    dependsOn 'test', 'stageWindowsPackageLibraries', 'buildWindowsPackageHost'
+    onlyIf { System.getProperty('os.name').startsWith('Windows') }
+    def compiler = javaToolchains.compilerFor { languageVersion = JavaLanguageVersion.of(21) }
+    doFirst {
+        commandLine 'powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+                file('scripts/package-windows.ps1'), '-JdkHome', compiler.get().metadata.installationPath.asFile
+    }
 }

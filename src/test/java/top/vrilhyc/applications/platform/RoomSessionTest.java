@@ -13,9 +13,14 @@ import static org.junit.jupiter.api.Assertions.*;
 class RoomSessionTest {
     static final AccountSession ACCOUNT = new AccountSession(7,"test",Map.of());
     static class Player implements LivePlayer {
+        volatile StreamSource source;
+        volatile boolean rejectAudio;
         final AtomicInteger plays = new AtomicInteger(), stops = new AtomicInteger();
         final CountDownLatch released = new CountDownLatch(1);
-        public void play(StreamSource source) { plays.incrementAndGet(); }
+        public void play(StreamSource source) {
+            if (rejectAudio && source.audioOnly()) throw new PlatformException("unsupported");
+            this.source = source; plays.incrementAndGet();
+        }
         public void stop() { stops.incrementAndGet(); }
         public void volume(int value) {}
         public void muted(boolean value) {}
@@ -57,6 +62,22 @@ class RoomSessionTest {
     }
     RoomSession room(Platform platform, Player player) {
         return new RoomSession(platform,"1",player,() -> ACCOUNT,ignored -> {});
+    }
+    @Test void audioSwitchPreservesAccountDisconnectionAndFailedSwitchKeepsVideo() throws Exception {
+        var platform = new Platform(); var player = new Player();
+        try (var room = room(platform,player)) {
+            room.play().get(2,TimeUnit.SECONDS);
+            player.rejectAudio = true;
+            assertThrows(ExecutionException.class,()->room.audioOnly(true).get(2,TimeUnit.SECONDS));
+            assertFalse(room.audioOnly()); assertFalse(player.source.audioOnly());
+            player.rejectAudio = false;
+            room.audioOnly(true).get(2,TimeUnit.SECONDS); assertTrue(player.source.audioOnly());
+            room.play().get(2,TimeUnit.SECONDS); assertTrue(player.source.audioOnly());
+            room.stop().get(2,TimeUnit.SECONDS); int plays = player.plays.get();
+            room.audioOnly(false).get(2,TimeUnit.SECONDS); assertEquals(plays,player.plays.get());
+            room.play().get(2,TimeUnit.SECONDS); assertFalse(player.source.audioOnly());
+            assertEquals(0,platform.connections.get()); assertEquals(RoomSession.InteractionState.DISCONNECTED,room.interactionState());
+        }
     }
     @Test void playbackNeverConnectsAndSendClosesWithoutStoppingPlayback() throws Exception {
         Platform platform = new Platform(); Player player = new Player();

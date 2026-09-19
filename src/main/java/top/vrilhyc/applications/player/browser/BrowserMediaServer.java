@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import com.google.gson.JsonParser;
 import com.sun.net.httpserver.*;
 import top.vrilhyc.applications.model.StreamSource;
+import top.vrilhyc.applications.model.DanmakuMessage;
 import java.io.*;
 import java.net.*;
 import java.net.http.*;
@@ -28,6 +29,9 @@ public final class BrowserMediaServer implements AutoCloseable {
     private volatile int volume = 30;
     private volatile boolean muted;
     private volatile boolean closed;
+    private boolean danmakuEnabled=true;
+    private long danmakuSequence, liveRequest;
+    private final ArrayDeque<Map<String,Object>> danmaku = new ArrayDeque<>();
 
     public BrowserMediaServer(Consumer<String> events) throws IOException {
         this.events = events;
@@ -38,15 +42,41 @@ public final class BrowserMediaServer implements AutoCloseable {
         server.start();
     }
     public URI page() { return URI.create(origin + prefix + "player.html"); }
-    public synchronized void play(StreamSource source) {
+    public void play(StreamSource source) {
         if (closed) return;
+        long expectedGeneration = generation;
         if (!HlsPlaylist.isHttp(source.uri())) throw new IllegalArgumentException("Invalid media URL");
-        generation++;
-        media = new Media(source, prefix, generation);
+        AudioOnlyHls audio = null;
+        if (source.audioOnly()) {
+            try { audio = AudioOnlyHls.prepare(client, source); }
+            catch (Exception e) {
+                if (e instanceof InterruptedException) Thread.currentThread().interrupt();
+                throw new top.vrilhyc.applications.platform.PlatformException("该来源暂不支持仅音频流，或音轨读取失败；请恢复画面后重试");
+            }
+        }
+        synchronized (this) {
+            if (closed) { if (audio != null) audio.cancel(); return; }
+            if (generation != expectedGeneration) {
+                if (audio != null) audio.cancel();
+                throw new CancellationException("播放请求已被替换");
+            }
+            cancelAudio();
+            generation++;
+            media = new Media(source, prefix, generation, audio);
+        }
     }
-    public synchronized void stop() { generation++; media = null; }
+    public synchronized void stop() { cancelAudio(); generation++; media = null; }
+    private void cancelAudio() { if (media != null && media.audio != null) media.audio.cancel(); }
     public void volume(int value) { volume = Math.clamp(value,0,100); }
     public void muted(boolean value) { muted = value; }
+    public synchronized void danmaku(DanmakuMessage message) {
+        if(closed || !danmakuEnabled) return;
+        danmaku.addLast(Map.of("sequence",++danmakuSequence,"sender",message.sender(),"text",message.text(),
+                "displayText",message.displayText(),"gift",message.gift()!=null));
+        while(danmaku.size()>100) danmaku.removeFirst();
+    }
+    public synchronized void danmakuVisible(boolean visible) { danmakuEnabled=visible; if(!visible) danmaku.clear(); }
+    public synchronized void goLive() { liveRequest++; }
 
     private void handle(HttpExchange exchange) {
         try (exchange) {
@@ -61,6 +91,13 @@ public final class BrowserMediaServer implements AutoCloseable {
                 String name = event.get("event").getAsString();
                 if (event.get("generation").getAsLong() == generation && media != null
                         && Set.of("playing","buffering","error","autoplay").contains(name)) events.accept(name);
+                if(event.get("generation").getAsLong()==generation
+                        && Set.of("view:focus","view:fullscreen","view:escape").contains(name)) events.accept(name);
+                if (event.get("generation").getAsLong()==generation && media!=null && name.equals("metrics")) {
+                    double distance=event.get("distance").getAsDouble();
+                    if(Double.isFinite(distance) && distance>=0 && distance<3600)
+                        events.accept("distance:"+String.format(Locale.ROOT,"%.1f",distance));
+                }
                 send(exchange,200,"application/json","{}".getBytes(StandardCharsets.UTF_8)); return;
             }
             if (!exchange.getRequestMethod().equals("GET")) { send(exchange,405,"text/plain",new byte[0]); return; }
@@ -69,7 +106,9 @@ public final class BrowserMediaServer implements AutoCloseable {
                 synchronized (this) {
                     Media current = media;
                     json = JSON.toJson(Map.of("generation",generation,"playing",current != null,
-                            "source",current == null ? "" : current.root,"volume",volume / 100.0,"muted",muted));
+                            "source",current == null ? "" : current.root,"volume",volume / 100.0,"muted",muted,
+                            "danmakuEnabled",danmakuEnabled,"danmaku",List.copyOf(danmaku),"liveRequest",liveRequest,
+                            "audioOnly",current != null && current.source.audioOnly()));
                 }
                 send(exchange,200,"application/json",json.getBytes(StandardCharsets.UTF_8));
             } else if (route.equals("player.html") || route.equals("player.js") || route.equals("hls.min.js")) {
@@ -86,7 +125,8 @@ public final class BrowserMediaServer implements AutoCloseable {
                 Media current = media;
                 URI remote = current == null ? null : current.find(exchange.getRequestURI().getPath());
                 if (remote == null) { send(exchange,410,"text/plain",new byte[0]); return; }
-                relay(exchange,current,deliveryDirectives(remote,exchange.getRequestURI().getRawQuery()));
+                relay(exchange,current,current.audio != null && !current.audio.separate() ? remote
+                        : deliveryDirectives(remote,exchange.getRequestURI().getRawQuery()));
             } else send(exchange,404,"text/plain",new byte[0]);
         } catch (Exception ignored) {
             // Do not log exceptions containing signed media URLs; hls.js handles failed requests.
@@ -106,6 +146,11 @@ public final class BrowserMediaServer implements AutoCloseable {
         return URI.create(address + (remote.getRawQuery() == null ? "?" : "&") + String.join("&",allowed));
     }
     private void relay(HttpExchange exchange, Media current, URI remote) throws Exception {
+        if (current.audio != null && !current.audio.separate()) {
+            byte[] audio = current.audio.media(remote);
+            if (audio != null) { send(exchange,200,"audio/mp4",audio); return; }
+            if (!remote.equals(current.audio.root())) { send(exchange,410,"text/plain",new byte[0]); return; }
+        }
         var builder = HttpRequest.newBuilder(remote).timeout(Duration.ofSeconds(20)).GET();
         for (String name : List.of("Referer","User-Agent")) {
             String value = current.source.headers().get(name);
@@ -126,9 +171,14 @@ public final class BrowserMediaServer implements AutoCloseable {
             if (new String(start,StandardCharsets.US_ASCII).equals("#EXTM3U")) {
                 byte[] data = content.readNBytes(2 * 1024 * 1024 + 1);
                 if (data.length > 2 * 1024 * 1024) { send(exchange,502,"text/plain",new byte[0]); return; }
-                String rewritten = HlsPlaylist.rewrite(new String(data,StandardCharsets.UTF_8),response.uri(),current::register);
+                String playlist = new String(data,StandardCharsets.UTF_8);
+                String rewritten = current.audio == null ? HlsPlaylist.rewrite(playlist,response.uri(),current::register)
+                        : current.audio.rewrite(playlist,response.uri(),current::register);
                 send(exchange,200,"application/vnd.apple.mpegurl",rewritten.getBytes(StandardCharsets.UTF_8));
             } else {
+                if (current.audio != null && !current.audio.separate()) {
+                    send(exchange,415,"text/plain",new byte[0]); return;
+                }
                 exchange.getResponseHeaders().set("Content-Type",type);
                 exchange.getResponseHeaders().set("Cache-Control","no-store");
                 response.headers().firstValue("Content-Range").ifPresent(value -> exchange.getResponseHeaders().set("Content-Range",value));
@@ -147,17 +197,19 @@ public final class BrowserMediaServer implements AutoCloseable {
     }
     @Override public synchronized void close() {
         if (closed) return;
-        closed = true; media = null; generation++;
+        closed = true; cancelAudio(); media = null; generation++;
         server.stop(0); workers.shutdownNow(); client.shutdownNow();
     }
     private static final class Media {
         final StreamSource source;
+        final AudioOnlyHls audio;
         final String prefix, root;
         final LinkedHashMap<URI,String> paths = new LinkedHashMap<>(16,0.75f,true);
         final Map<String,URI> urls = new HashMap<>();
-        Media(StreamSource source, String prefix, long generation) {
+        Media(StreamSource source, String prefix, long generation, AudioOnlyHls audio) {
+            this.audio = audio;
             this.source = source; this.prefix = prefix + "media/" + generation + "/";
-            root = register(source.uri());
+            root = register(audio == null ? source.uri() : audio.root());
         }
         synchronized String register(URI uri) {
             String path = paths.get(uri);
@@ -167,7 +219,7 @@ public final class BrowserMediaServer implements AutoCloseable {
             if (paths.size() > 4096) {
                 for (var iterator = paths.entrySet().iterator(); iterator.hasNext();) {
                     var entry = iterator.next();
-                    if (entry.getKey().equals(source.uri())) continue;
+                    if (entry.getValue().equals(root)) continue;
                     urls.remove(entry.getValue()); iterator.remove(); break;
                 }
             }

@@ -2,6 +2,7 @@ package top.vrilhyc.applications.platform;
 
 import top.vrilhyc.applications.auth.AccountSession;
 import top.vrilhyc.applications.model.LiveRoom;
+import top.vrilhyc.applications.model.StreamSource;
 import top.vrilhyc.applications.player.LivePlayer;
 import java.util.Set;
 import java.util.concurrent.*;
@@ -26,6 +27,9 @@ public final class RoomSession implements AutoCloseable {
     private volatile boolean closed;
     private volatile RoomInteraction interaction;
     private volatile LiveRoom room;
+    private StreamSource lastSource;
+    private volatile boolean audioOnly;
+    private boolean stopped = true;
     private volatile InteractionState state = InteractionState.DISCONNECTED;
 
     public RoomSession(LivePlatform platform, String input, LivePlayer player,
@@ -48,7 +52,8 @@ public final class RoomSession implements AutoCloseable {
                 if (playbackVersion.get() != ticket) throw new CancellationException("播放请求已被替换");
                 room = resolved;
             }
-            player.play(stream);
+            player.play(stream.withAudioOnly(audioOnly));
+            lastSource = stream; stopped = false;
             checkOpen();
             change(InteractionState.DISCONNECTED);
             return resolved;
@@ -96,7 +101,16 @@ public final class RoomSession implements AutoCloseable {
     }
     public CompletableFuture<Void> stop() {
         playbackVersion.incrementAndGet();
-        return submit(() -> { player.stop(); return null; });
+        return submit(() -> { stopped = true; player.stop(); return null; });
+    }
+    public boolean audioOnly() { return audioOnly; }
+    /** Prepare the alternate media before replacing playback; a failure preserves the current mode. */
+    public CompletableFuture<Void> audioOnly(boolean value) {
+        return submit(() -> {
+            if (lastSource != null && !stopped) player.play(lastSource.withAudioOnly(value));
+            audioOnly = value;
+            return null;
+        });
     }
     public CompletableFuture<Void> volume(int value) { return submit(() -> { player.volume(value); return null; }); }
     public CompletableFuture<Void> muted(boolean value) { return submit(() -> { player.muted(value); return null; }); }

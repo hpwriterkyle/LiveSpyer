@@ -1,3 +1,4 @@
+param([string]$OutputDirectory)
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 # Gradle may inherit PowerShell 7 module paths; use this Windows PowerShell's own modules.
@@ -6,6 +7,12 @@ $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $downloads = Join-Path $projectRoot 'build/downloads'
 $sdk = Join-Path $projectRoot 'build/webview2-sdk'
 $output = Join-Path $projectRoot 'build/native-host'
+if ($OutputDirectory) {
+    $output = [IO.Path]::GetFullPath($OutputDirectory)
+    if (-not $output.StartsWith((Join-Path $projectRoot 'build') + [IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Browser host output must remain inside the project build directory.'
+    }
+}
 $archive = Join-Path $downloads 'webview2-1.0.2903.40.zip'
 $checksum = 'ef128016dd1e51c59178c827ed5b8aa3322c57afa8675d930f8109505542ad74'
 New-Item -ItemType Directory -Force -Path $downloads, $output | Out-Null
